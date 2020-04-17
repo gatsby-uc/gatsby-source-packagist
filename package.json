@@ -1,0 +1,12 @@
+{
+  "name": "gatsby-source-packagist",
+  "version": "1.0.0",
+  "description": "Integrate Packagist(PHP package repository) with gatsby GraphQL data schema.",
+  "main": "index.js",
+  "repository": "git@github.com:moonmeister/gatsby-source-packagist.git",
+  "author": "Alex Moon <alex.jared.moon@gmail.com>",
+  "license": "MIT",
+  "dependencies": {
+    "axios": "^0.19.2"
+  }
+}
