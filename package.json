@@ -7,6 +7,14 @@
   "author": "Alex Moon <alex.jared.moon@gmail.com>",
   "license": "MIT",
   "dependencies": {
-    "axios": "^0.19.2"
+    "axios": "^0.19.2",
+    "mime-types": "^2.1.26",
+    "packagist-api-client": "^2.0.0"
+  },
+  "scripts": {
+    "format": "prettier --write ."
+  },
+  "devDependencies": {
+    "prettier": "^2.0.4"
   }
 }

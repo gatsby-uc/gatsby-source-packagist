@@ -1,39 +1,100 @@
-const packagist = require('packagist-api-client')
-const axios = require('axios')
+const packagist = require('packagist-api-client');
+const axios = require('axios');
+const mime = require('mime-types');
 
-exports.sourceNodes = async ({ actions, createNodeId, createContentDigest }) => {
-  const { packageNames } = await packagist.getAll()
+async function getAllSearchResults(fetchResults, allResults = []) {
+  const { results: pageResults, total, next } = await fetchResults();
 
-  for (packagePath of packageNames) {
-    const { package } = await packagist.getPackageDetails(packagePath)
-    const contents = { mediaType: 'text/markdown', content: '' }
+  allResults.push(pageResults);
 
-    const masterVersion = package.versions['dev-master'].source
-
-    const { url: masterUrl, reference: commitHash } = masterVersion
-    if (masterUrl.includes("github.com")) {
-
-      const url = new URL(masterUrl)
-
-      const packagePath = url.pathname.substring(1, url.pathname.lastIndexOf('.'))
-
-      const { data } = await axios.get(`https://raw.githubusercontent.com/${packagePath}/${commitHash}/README.md`)
-
-      contents.content = data
-
-    }
-
-    actions.createNode({
-      ...package,
-      id: createNodeId(package.name), // required by Gatsby
-      parent: null,
-      children: [],
-      internal: {
-        type: 'packagistPackage', // required by Gatsby
-        contentDigest: createContentDigest(contents.content),// required by Gatsby, must be unique
-        ...contents
-      }
-    })
+  if (!next) {
+    const results = allResults.flat();
+    return { results, total };
   }
-  // This is where we actually create the data node, by passing in the newNode object.
+
+  return getAllSearchResults(next, allResults);
+}
+
+// Array order determins order they're attempted to be fetched in...
+const README_FILES = ['README.md', 'readme.md', 'Readme.md'];
+
+const README_DOMAINS = {
+  'github.com': (path, file) => `https://raw.githubusercontent.com${path}/master/${file}`,
+};
+
+async function fetchReadme(urlBuilder, path, reporter, fileNumber = 0) {
+  const fileName = README_FILES[fileNumber];
+  const url = urlBuilder(path, fileName);
+
+  try {
+    console.log(url);
+    const { data: file } = await axios.get(url);
+
+    const mimeType = mime.lookup(fileName.substring(fileName.lastIndexOf('.'))) || 'text/plain';
+
+    return { file, mimeType };
+  } catch (e) {
+    const nextFileNumber = fileNumber + 1;
+    if (e.response && e.response.status === 404 && README_FILES[nextFileNumber])
+      return fetchReadme(urlBuilder, path, reporter, nextFileNumber);
+    else
+      reporter.warn(`Unable to find readme for: ${path}.
+      It might just be under a slightly different name than we're expecting (PRs are welcome to fix this).`);
+  }
+}
+
+async function getPackageReadme(package, reporter) {
+  const { repository, name } = package;
+
+  const { hostname, pathname } = new URL(repository);
+
+  if (README_DOMAINS.hasOwnProperty(hostname)) {
+    reporter.verbose(`Getting readme for package: ${name}`);
+    try {
+      return await fetchReadme(README_DOMAINS[hostname], pathname, reporter);
+    } catch (e) {
+      reporter.error('not sure what went wrong', e);
+    }
+  } else {
+    reporter.verbose(
+      `Package "${name}" isn't hosted on Github, unable to fetch Readme yet (PRs welcome).`
+    );
+  }
+}
+
+exports.sourceNodes = async (
+  { actions, createNodeId, createContentDigest, reporter },
+  { query }
+) => {
+  if (!query || !(query.name || query.type || query.tags)) {
+    reporter.error('No query paramaters passed to packagist api', query);
+  } else {
+    try {
+      const { results: packages, total } = await getAllSearchResults(async () =>
+        packagist.search(query)
+      );
+      reporter.info(`Sourcing results for ${total} Packagist packages!`);
+
+      for (package of packages) {
+        const { file: readme, mimeType } = (await getPackageReadme(package, reporter)) || '';
+
+        actions.createNode({
+          ...package,
+          readme: readme,
+          id: createNodeId(package.name),
+          internal: {
+            type: 'packagistPackage',
+            mediaType: mimeType,
+            contentDigest: createContentDigest(readme),
+            content: readme,
+          },
+        });
+      }
+    } catch (e) {
+      if (e.response) {
+        reporter.error('Error searching for packages: ', e);
+      }
+      reporter.panic('unkown error', e);
+    }
+  }
 };
