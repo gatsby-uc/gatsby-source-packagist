@@ -1,16 +1,10 @@
-import { search as searchPackagist } from 'packagist-api-client/search';
-import axios from 'axios';
-import mime from 'mime-types';
-
-//TODO: gatsby default babel setup
-//TODO: Update code after babel setup
-//TODO: Use GH API to get readme?
-//TODO: publish to NPM
-//TODO: integrate into wp-graphql site
+import { search as searchPackagist } from 'packagist-api-client';
+import { createRemoteFileNode } from "gatsby-source-filesystem";
+import { Octokit } from "@octokit/rest";
 
 export async function sourceNodes(
   { actions, createNodeId, createContentDigest, reporter },
-  { query } // plugin-options
+  { query, githubApi } // plugin-options
 ) {
   if (!query || !(query.name || query.type || query.tags)) {
     reporter.error('No query paramaters passed to packagist api', query);
@@ -19,20 +13,17 @@ export async function sourceNodes(
       const { results: packages, total } = await getAllSearchResults(async () =>
         searchPackagist(query)
       );
-      reporter.info(`Sourcing results for ${total} Packagist packages!`);
 
-      for (pkg of packages) {
-        const { file: readme, mimeType } = (await getPackageReadme(pkg, reporter)) || '';
+      reporter.info(`Got results for ${total} Packagist packages!`);
 
+      for (const pkg of packages) {
         actions.createNode({
           ...pkg,
-          readme: readme,
           id: createNodeId(pkg.name),
           internal: {
             type: 'packagistPackage',
-            mediaType: mimeType,
-            contentDigest: createContentDigest(readme),
-            content: readme,
+            contentDigest: createContentDigest(pkg),
+            content: JSON.stringify(pkg),
           },
         });
       }
@@ -40,10 +31,84 @@ export async function sourceNodes(
       if (e.response) {
         reporter.error('Error searching for packages: ', e);
       }
-      reporter.panic('unkown error', e);
+      console.error(e)
+      reporter.panic('unkown error');
     }
   }
 };
+
+export async function createResolvers({ actions, createResolvers, createNodeId, createContentDigest, reporter, store, cache }, { githubApi }) {
+  global.reporter = reporter;
+  const { createNode } = actions;
+
+  const README_DOMAINS = {};
+
+  if (githubApi) {
+    const octokit = new Octokit(githubApi);
+
+    README_DOMAINS['github.com'] = async (path) => {
+      const lastSlash = path.lastIndexOf('/')
+      const repo = {
+        owner: path.substring(path.indexOf('/') + 1, lastSlash),
+        repo: path.substring(lastSlash + 1)
+      }
+
+      try {
+        const { data: { download_url: url }
+        } = await octokit.repos.getReadme(repo)
+
+        return url;
+      } catch (e) {
+        if (e.status === 403) {
+          const errorText = `Github: ${e}`
+          reporter.panicOnBuild(errorText)
+        } else {
+          reporter.warn('Error Fetching Readme from Github', e)
+        }
+      }
+    }
+  }
+
+
+
+  createResolvers({
+    packagistPackage: {
+      readmeFile: {
+        type: "File",
+        async resolve(source) {
+
+          const { repository, name } = source;
+
+          const { hostname, pathname } = new URL(repository);
+
+          if (README_DOMAINS.hasOwnProperty(hostname)) {
+            try {
+              reporter.verbose(`Getting readme for package: ${name}`);
+
+              const url = await README_DOMAINS[hostname](pathname)
+
+              return createRemoteFileNode({
+                url,
+                store,
+                cache,
+                createNode,
+                createNodeId,
+                reporter,
+              })
+            } catch (e) {
+              reporter.error('Well that was unexpected', e);
+            }
+          } else {
+            reporter.warn(
+              `Package "${name}" isn't hosted on Github, unable to fetch Readme for non-github repos yet (PRs welcome).`
+            );
+          }
+
+        }
+      }
+    }
+  })
+}
 
 
 async function getAllSearchResults(fetchResults, allResults = []) {
@@ -59,49 +124,4 @@ async function getAllSearchResults(fetchResults, allResults = []) {
   return getAllSearchResults(next, allResults);
 }
 
-// Array order determins order they're attempted to be fetched in...
-const README_FILES = ['README.md', 'readme.md', 'Readme.md'];
 
-const README_DOMAINS = {
-  'github.com': (path, file) => `https://raw.githubusercontent.com${path}/master/${file}`,
-};
-
-async function fetchReadme(urlBuilder, path, reporter, fileNumber = 0) {
-  const fileName = README_FILES[fileNumber];
-  const url = urlBuilder(path, fileName);
-
-  try {
-    console.log(url);
-    const { data: file } = await axios.get(url);
-
-    const mimeType = mime.lookup(fileName.substring(fileName.lastIndexOf('.'))) || 'text/plain';
-
-    return { file, mimeType };
-  } catch (e) {
-    const nextFileNumber = fileNumber + 1;
-    if (e.response && e.response.status === 404 && README_FILES[nextFileNumber])
-      return fetchReadme(urlBuilder, path, reporter, nextFileNumber);
-    else
-      reporter.warn(`Unable to find readme for: ${path}.
-      It might just be under a slightly different name than we're expecting (PRs are welcome to fix this).`);
-  }
-}
-
-async function getPackageReadme(pkg, reporter) {
-  const { repository, name } = pkg;
-
-  const { hostname, pathname } = new URL(repository);
-
-  if (README_DOMAINS.hasOwnProperty(hostname)) {
-    reporter.verbose(`Getting readme for package: ${name}`);
-    try {
-      return await fetchReadme(README_DOMAINS[hostname], pathname, reporter);
-    } catch (e) {
-      reporter.error('not sure what went wrong', e);
-    }
-  } else {
-    reporter.verbose(
-      `Package "${name}" isn't hosted on Github, unable to fetch Readme yet (PRs welcome).`
-    );
-  }
-}

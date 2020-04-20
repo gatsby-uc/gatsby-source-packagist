@@ -102,3 +102,7 @@ dist
 
 # TernJS port file
 .tern-port
+
+gatsby-node.js
+gatsby-ssr.js
+gatsby-browser.js
